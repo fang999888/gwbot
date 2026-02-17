@@ -1,6 +1,6 @@
 import os
 import hashlib
-import hmacㄡ
+import hmac
 import base64
 import logging
 from fastapi import FastAPI, Request, Header
@@ -25,26 +25,22 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# 檢查必要的環境變數
 if not all([LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, DEEPSEEK_API_KEY]):
     logger.error("❌ 缺少必要的環境變數！請檢查 .env 或 Render 的 Environment Variables")
-    # 不停止程式，但後續會無法正常工作
 
 # ---------- 初始化客戶端 ----------
-# DeepSeek (OpenAI 相容)
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com/v1",
-    timeout=15.0,          # 超過 15 秒視為超時
+    timeout=15.0,
     max_retries=1
 )
 
-# LINE Bot API
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN) if LINE_CHANNEL_ACCESS_TOKEN else None
 parser = WebhookParser(LINE_CHANNEL_SECRET) if LINE_CHANNEL_SECRET else None
 
-# ---------- 植生牆大師系統提示詞（請填上你原本的完整內容）----------
-SYSTEM_PROMPT = """
+# ---------- 植生牆大師系統提示詞（已加入長度指南）----------
+BASE_SYSTEM_PROMPT = """
 你是一位在台灣植生牆界打滾超過 20 年的「傳奇導師」。你見證過從早期簡陋的篋網式，到現在尖端的自動化智慧灌溉系統的演進。你說話幽默風趣，像個愛開玩笑但手底見真章的老頑童。你對植物有深厚的情感，視它們為生命而非裝飾品。
 
 專業領域：
@@ -52,21 +48,20 @@ SYSTEM_PROMPT = """
 - 植物生理學：專精 CAM 植物（如積水鳳梨、鹿角蕨）的生理機制，擅長診斷氣孔、蒸散作用與養分吸收問題。
 - 實務環境預判：能一眼看出哪些牆面是「植物墳場」，並針對光、水、氣、肥給出精準對策。
 
- 回應長度指南：
-- 使用者問簡單問題（如「多少錢」、「怎麼了」、「推薦嗎」），回答控制在 30-50 字，最多 3 句話。
-- 使用者問具體問題（如「我家客廳西曬適合什麼植物」），回答 80-120 字，重點在實用建議。
-- 只有當使用者明顯在問詳細分析（如「請幫我分析三種系統的優缺點」），才給詳細比較。
-- 報價時四維度仍要提，但每點一句話帶過，例如：「系統方面建議模組化盆組，雖然貴一點但以後好維護；植物用波士頓腎蕨就好，積水鳳梨你預算不夠...」
-
 回應風格：
-1. 幽默接地氣，多用生動比喻（例如：「鹿角蕨就像愛撒嬌的女友，通風不夠她就鬧脾氣爛給你看」）。
-2. 涉及預算或報價時，一定要拆解四個維度：系統選型、植物等級、環境工程、長期維修。嚴禁直接給總價。
+1. 幽默接地氣，多用生動比喻。
+2. 涉及預算或報價時，拆解四個維度：系統選型、植物等級、環境工程、長期維修。
 3. 診斷植物問題時，依序檢查：光、水、氣、肥。
+
+📏 重要：你要懂得察言觀色，根據使用者的問題長度決定回應長度：
+- 如果使用者只問短短一句（例如「多少錢」、「怎麼了」），回答控制在 3 句話以內，約 30~50 字。
+- 如果使用者稍微描述情況（例如「我家客廳西曬適合什麼植物」），回答 80~120 字，重點給實用建議。
+- 只有當使用者明顯在問詳細分析（例如「請幫我分析三種系統的優缺點」），才給詳細比較。
+- 報價時四維度都要提，但每點用一句話帶過，不要長篇大論。
 """
 
 # ---------- 輔助函數 ----------
 def verify_signature(body: bytes, signature: str) -> bool:
-    """驗證 LINE 請求簽名"""
     if not LINE_CHANNEL_SECRET:
         return False
     hash = hmac.new(
@@ -77,10 +72,25 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return base64.b64encode(hash).decode() == signature
 
 def truncate_text(text: str, max_length: int = 4800) -> str:
-    """LINE 訊息長度限制 5000，保留 200 緩衝"""
     if len(text) <= max_length:
         return text
     return text[:max_length-3] + "..."
+
+def decide_response_params(user_msg: str):
+    """根據使用者訊息長度決定 max_tokens 和額外的長度指示"""
+    length = len(user_msg)
+    if length < 20:
+        # 極簡提問
+        return 200, "使用者問得很簡單，請用 1~2 句話簡潔回答。"
+    elif length < 50:
+        # 一般簡短
+        return 400, "請用 3~4 句話回答，重點明確。"
+    elif length < 150:
+        # 中等描述
+        return 600, "請適當展開，但不要囉嗦。"
+    else:
+        # 詳細描述
+        return 1024, "使用者提供較多資訊，可以詳細回答。"
 
 # ---------- FastAPI 應用 ----------
 app = FastAPI(title="植生牆大師 LINE Bot")
@@ -91,28 +101,23 @@ async def root():
 
 @app.get("/webhook")
 async def verify_webhook():
-    """LINE 會用 GET 驗證 webhook 有效性"""
     return PlainTextResponse("OK")
 
 @app.post("/webhook")
 async def webhook(request: Request, x_line_signature: str = Header(None)):
-    # 讀取請求內容（bytes）
     body = await request.body()
     logger.info(f"📨 收到請求，長度：{len(body)}")
 
-    # 簽名驗證（失敗仍回 200，避免 LINE 重試）
     if not verify_signature(body, x_line_signature):
         logger.warning("⚠️ 簽名驗證失敗")
         return PlainTextResponse("OK")
 
-    # 確認 LINE 相關物件已初始化
     if not parser or not line_bot_api:
         logger.error("❌ LINE 憑證未正確初始化")
         return PlainTextResponse("OK")
 
-    # ---------- 解析事件（注意：parse 需要字串，不是 bytes）----------
     try:
-        body_str = body.decode('utf-8')          # 將 bytes 轉為字串
+        body_str = body.decode('utf-8')
         events = parser.parse(body_str, x_line_signature)
     except InvalidSignatureError:
         logger.warning("⚠️ 解析時簽名無效")
@@ -121,15 +126,14 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
         logger.error(f"❌ 解析事件錯誤：{e}")
         return PlainTextResponse("OK")
 
-    # ---------- 處理每個事件 ----------
     for event in events:
         if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
             user_msg = event.message.text
             reply_token = event.reply_token
-            user_id = event.source.user_id      # 用於後續 push_message
+            user_id = event.source.user_id
             logger.info(f"💬 使用者說：{user_msg}")
 
-            # 1. 快速回應（讓使用者知道 Bot 有反應）
+            # 快速回應
             try:
                 line_bot_api.reply_message(
                     reply_token,
@@ -137,19 +141,22 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
                 )
             except Exception as e:
                 logger.error(f"❌ 快速回應失敗：{e}")
-                # 快速回應失敗可能 token 已過期，跳過本次事件
                 continue
 
-            # 2. 呼叫 DeepSeek API 取得大師回覆
+            # 根據訊息長度決定回應參數
+            max_tokens, length_instruction = decide_response_params(user_msg)
+            # 組裝 system prompt（加入長度指示）
+            system_content = BASE_SYSTEM_PROMPT + f"\n\n本次回應特別指示：{length_instruction}"
+
             try:
                 response = client.chat.completions.create(
                     model="deepseek-chat",
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": system_content},
                         {"role": "user", "content": user_msg}
                     ],
-                    temperature=0.8,
-                    max_tokens=1024,
+                    temperature=0.7 if max_tokens < 500 else 0.8,
+                    max_tokens=max_tokens,
                 )
                 reply = response.choices[0].message.content
                 logger.info(f"✅ DeepSeek 回覆（前50字）：{reply[:50]}")
@@ -163,10 +170,9 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
                 reply = "拎北腦袋突然打結，等一下再問啦～"
                 logger.error(f"❌ 未知錯誤：{e}")
 
-            # 3. 截斷過長訊息
             final_reply = truncate_text(reply)
 
-            # 4. 推送最終答案（push_message 不受 token 時效限制）
+            # 推送最終答案
             try:
                 line_bot_api.push_message(
                     user_id,
@@ -178,5 +184,4 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
             except Exception as e:
                 logger.error(f"❌ 其他發送錯誤：{e}")
 
-    # 無論如何都回傳 200 OK
     return PlainTextResponse("OK")
