@@ -3,3 +3,4 @@ uvicorn
 python-dotenv
 openai  # DeepSeek 使用 OpenAI 兼容介面
 httpx
+line-bot-sdk
