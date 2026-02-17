@@ -1,6 +1,6 @@
 import os
 import hashlib
-import hmac
+import hmacㄡ
 import base64
 import logging
 from fastapi import FastAPI, Request, Header
@@ -133,7 +133,7 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
             try:
                 line_bot_api.reply_message(
                     reply_token,
-                    TextSendMessage(text="🌱 拎北聽到了，正在幫你查植生牆的祕訣，稍等喔...")
+                    TextSendMessage(text="🌱 聽到了，今年沒年終肚子有點餓，稍等喔...")
                 )
             except Exception as e:
                 logger.error(f"❌ 快速回應失敗：{e}")
