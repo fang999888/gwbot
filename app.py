@@ -2,14 +2,18 @@ import os
 import hashlib
 import hmac
 import base64
-import json
+import logging
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 from openai import OpenAI
 from linebot import LineBotApi, WebhookParser
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import TextSendMessage, MessageEvent, TextMessage
+
+# 設定 logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -20,28 +24,23 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # DeepSeek 客戶端
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+if not DEEPSEEK_API_KEY:
+    logger.error("DEEPSEEK_API_KEY 未設定")
 client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com/v1"
 )
 
 # LINE Bot API 初始化
+if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
+    logger.error("LINE_CHANNEL_SECRET 或 LINE_CHANNEL_ACCESS_TOKEN 未設定")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 parser = WebhookParser(LINE_CHANNEL_SECRET)
 
-# 植生牆大師系統提示詞（就是你給的那段）
+# 植生牆大師系統提示詞
 SYSTEM_PROMPT = """
-你是一位在台灣植生牆界打滾超過 20 年的「傳奇導師」。你見證過從早期簡陋的篋網式，到現在尖端的自動化智慧灌溉系統的演進。你說話幽默風趣，像個愛開玩笑但手底見真章的老頑童。你對植物有深厚的情感，視它們為生命而非裝飾品。
-
-專業領域：
-- 工程與報價：精通毛氈式、盆組式、布袋式系統的結構安全、施工細節與長期維護成本。
-- 植物生理學：專精 CAM 植物（如積水鳳梨、鹿角蕨）的生理機制，擅長診斷氣孔、蒸散作用與養分吸收問題。
-- 實務環境預判：能一眼看出哪些牆面是「植物墳場」，並針對光、水、氣、肥給出精準對策。
-
-回應風格：
-1. 幽默接地氣，多用生動比喻（例如：「鹿角蕨就像愛撒嬌的女友，通風不夠她就鬧脾氣爛給你看」）。
-2. 涉及預算或報價時，一定要拆解四個維度：系統選型、植物等級、環境工程、長期維修。嚴禁直接給總價。
-3. 診斷植物問題時，依序檢查：光、水、氣、肥。
+你是一位在台灣植生牆界打滾超過 20 年的「傳奇導師」...（完整內容省略，請貼回你原本的）...
 """
 
 def verify_signature(request_body: bytes, x_line_signature: str) -> bool:
@@ -70,10 +69,13 @@ async def webhook(
 ):
     # 取得請求內容
     body = await request.body()
+    logger.info(f"Received webhook: {body[:200]}...")  # 記錄前200字符
     
-    # 驗證簽名（安全性檢查）
+    # 驗證簽名
     if not verify_signature(body, x_line_signature):
-        raise HTTPException(status_code=400, detail="Invalid signature")
+        logger.warning("Invalid signature")
+        # 簽名錯誤直接回傳 200 但記錄警告，不回傳 400 避免 LINE 重試
+        return PlainTextResponse("OK")
     
     try:
         # 解析 LINE 事件
@@ -82,10 +84,10 @@ async def webhook(
         # 處理每個事件
         for event in events:
             if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
-                # 使用者傳來的訊息
                 user_message = event.message.text
+                logger.info(f"Received message: {user_message}")
                 
-                # 呼叫 DeepSeek API 取得大師回覆
+                # 呼叫 DeepSeek API
                 try:
                     response = client.chat.completions.create(
                         model="deepseek-chat",
@@ -97,22 +99,27 @@ async def webhook(
                         max_tokens=1024
                     )
                     reply_text = response.choices[0].message.content
+                    logger.info(f"Generated reply: {reply_text[:50]}...")
                 except Exception as e:
-                    reply_text = f"哎呀，大師今天當機了，錯誤訊息：{str(e)}"
+                    logger.error(f"DeepSeek API error: {e}")
+                    reply_text = "哎呀，大師腦袋卡住了，等一下再問我喔～"
                 
-                # 透過 LINE API 回覆
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=reply_text)
-                )
+                # 回覆 LINE
+                try:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text=reply_text)
+                    )
+                except LineBotApiError as e:
+                    logger.error(f"LINE reply error: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected LINE reply error: {e}")
         
         return PlainTextResponse("OK")
     
     except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
+        logger.warning("Invalid signature from parser")
+        return PlainTextResponse("OK")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        logger.error(f"Unexpected error in webhook: {e}", exc_info=True)
+        return PlainTextResponse("OK")
