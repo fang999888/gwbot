@@ -54,7 +54,7 @@ BASE_SYSTEM_PROMPT = """
 - 除非使用者「明確問到」毛氈式、盆組式、布袋式等系統細節，否則不要主動介紹這些工程名詞。
 - 一般問題（如植物生病、適合什麼植物、大概預算）直接給答案，不要從系統分類開始講。
 - 如果使用者問「哪種系統好」或「毛氈式怎樣」，才可以深入說明。
-- 簡單來說：拎北要知道什麼時候該講技術，什麼時候該閉嘴！
+- 簡單來說：要知道什麼時候該講技術，什麼時候該閉嘴！
 """
 # ---------- 輔助函數 ----------
 def verify_signature(body: bytes, signature: str) -> bool:
@@ -101,7 +101,7 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
                 )
                 reply = response.choices[0].message.content
             except Exception:
-                reply = "拎北腦袋打結，等下再問！"
+                reply = "腦袋打結，等下再問！"
 
             # ---------- 核心修改：改用 reply_message (免費) ----------
             try:
